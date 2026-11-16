@@ -1,50 +1,99 @@
-
+/*
+ * ------------------------------------------------------------------
+ *  RC Car Engine Sound - engine sound volume follows the throttle
+ * ------------------------------------------------------------------
+ *  Board  : Arduino Uno / Nano (ATmega328P)
+ *  Wiring : A0  -> RC receiver throttle channel (signal)
+ *           D9  -> speaker amplifier input (TMRpcm audio out)
+ *           SD card module: CS -> D4, MOSI -> D11, MISO -> D12, SCK -> D13
+ *           GND -> common ground (receiver, SD module, amplifier)
+ *  Sound  : "engine.wav" in the SD card root, 8-bit unsigned PCM,
+ *           mono, 16-32 kHz sample rate
+ *  Author : Swayam Khantwal (github.com/Swayam7024)
+ *  License: MIT
+ * ------------------------------------------------------------------
+ */
 
 // Include the necessary libraries
-
-#include <Servo.h>
+#include <SPI.h>
+#include <SD.h>
 #include <TMRpcm.h>
 
 // Define the pin numbers
-#define THROTTLE_PIN A0
-#define SPEAKER_PIN 9
+#define THROTTLE_PIN A0      // receiver throttle signal (used as a digital input)
+#define SPEAKER_PIN 9        // TMRpcm audio output (Timer1)
+#define SD_CS_PIN 4          // SD card module chip select
 
-// Create servo object to read throttle input
-Servo throttle;
+// Sound file on the SD card (8-bit mono WAV)
+const char ENGINE_SOUND_FILE[] = "engine.wav";
+
+// RC throttle pulse range (µs)
+const unsigned long THROTTLE_MIN_US = 1000;
+const unsigned long THROTTLE_MAX_US = 2000;
+const unsigned long PULSE_TIMEOUT_US = 25000;  // no pulse within 25 ms -> no signal
+
+// TMRpcm volume range (0-7)
+const int VOLUME_IDLE = 2;   // engine idle volume
+const int VOLUME_MAX  = 7;   // full throttle volume
 
 // Create TMRpcm object to play audio
 TMRpcm audio;
+
+int currentVolume = -1;
 
 void setup() {
   // Initialize serial communication
   Serial.begin(9600);
 
-  // Attach throttle input to pin
-  throttle.attach(THROTTLE_PIN);
+  pinMode(THROTTLE_PIN, INPUT);
+
+  // Initialize the SD card
+  if (!SD.begin(SD_CS_PIN)) {
+    Serial.println("SD card init failed - check wiring and card.");
+    while (true) {}
+  }
 
   // Initialize audio playback
   audio.speakerPin = SPEAKER_PIN;
-  audio.quality(0); // Set audio quality (0-1, 1 is highest quality)
+  audio.quality(0);   // 0 = normal, 1 = 2x oversampling (needs more CPU)
+  audio.setVolume(VOLUME_IDLE);
 
-  // Start playing engine sound
-  audio.loop("car engen sound.mp3"); // Replace "engine.wav" with your engine sound file name
+  // Start playing the engine sound and keep looping it
+  audio.loop(1);
+  audio.play(ENGINE_SOUND_FILE);
 }
 
 void loop() {
-  // Read throttle position
-  int throttlePosition = throttle.read();
+  // Read the throttle pulse from the receiver.
+  // pulseInLong() uses micros(), so it stays accurate while TMRpcm's
+  // audio interrupts are running (plain pulseIn() would read too short).
+  unsigned long throttlePulse = pulseInLong(THROTTLE_PIN, HIGH, PULSE_TIMEOUT_US);
 
-  // Map throttle position to engine sound parameters
-  int volume = map(throttlePosition, 0, 1023, 0, 30); // Adjust volume based on throttle position
-  //int pitch = map(throttlePosition, 0, 1023, 500, 1000); // Adjust pitch based on throttle position
+  int volume;
+  if (throttlePulse == 0) {
+    volume = VOLUME_IDLE;   // no receiver signal -> idle sound
+  } else {
+    throttlePulse = constrain(throttlePulse, THROTTLE_MIN_US, THROTTLE_MAX_US);
+    // Map throttle position to engine sound volume
+    volume = map(throttlePulse, THROTTLE_MIN_US, THROTTLE_MAX_US, VOLUME_IDLE, VOLUME_MAX);
+  }
 
-  // Set volume and pitch for engine sound
-  audio.setVolume(volume);
-  //audio.setPitch(pitch);
+  // Only change the volume when it actually changes
+  if (volume != currentVolume) {
+    audio.setVolume(volume);
+    currentVolume = volume;
+  }
 
-  // Print throttle position (for debugging)
-  Serial.println(throttlePosition);
+  // Restart the sound if playback stopped for any reason
+  if (!audio.isPlaying()) {
+    audio.play(ENGINE_SOUND_FILE);
+  }
 
-  // Delay to prevent overwhelming the serial output and to allow for smooth audio playback
-  delay(500);
+  // Print throttle pulse and volume (for debugging)
+  Serial.print(throttlePulse);
+  Serial.print(" us -> volume ");
+  Serial.println(volume);
+
+  // Short delay to keep the serial output readable
+  delay(50);
 }
